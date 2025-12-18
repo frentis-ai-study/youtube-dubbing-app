@@ -11,6 +11,13 @@ CONFIG_FILE = Path.home() / ".config" / "youtube-dubbing" / "config.json"
 @dataclass
 class Config:
     """앱 설정"""
+    # AI 엔진 선택 (ollama / zai)
+    ai_engine: str = "ollama"
+
+    # Ollama 설정
+    ollama_model: str = "gemma3:latest"
+    ollama_base_url: str = "http://localhost:11434"
+
     # z.ai API 설정
     zai_api_key: str = ""
     zai_base_url: str = "https://api.z.ai/api/coding/paas/v4"
@@ -31,10 +38,15 @@ class Config:
 
 
 def load_config() -> Config:
-    """설정 파일 로드"""
+    """설정 파일 로드 (누락된 필드는 기본값 사용)"""
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            # 기본값과 병합 (새 필드 호환성)
+            default = Config()
+            for key in default.__dataclass_fields__:
+                if key not in data:
+                    data[key] = getattr(default, key)
             return Config(**data)
         except (json.JSONDecodeError, TypeError):
             pass
