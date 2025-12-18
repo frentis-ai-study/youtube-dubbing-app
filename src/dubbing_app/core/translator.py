@@ -199,19 +199,13 @@ def translate_text(
             "error": str (실패 시)
         }
     """
-    if not api_key:
-        return {
-            "success": False,
-            "error": "API 키가 설정되지 않았습니다.",
-        }
-
     if not text.strip():
         return {
             "success": True,
             "translated": "",
         }
 
-    # Ollama 사용 시 사전 체크
+    # Ollama 사용 시 사전 체크 (API 키 불필요)
     is_ollama = "localhost:11434" in base_url
     if is_ollama:
         status = check_ollama_status(base_url)
@@ -220,6 +214,13 @@ def translate_text(
                 "success": False,
                 "error": status.get("error", "Ollama 서버 연결 실패"),
             }
+        # Ollama는 API 키 불필요 - 더미 값 사용
+        api_key = api_key or "ollama"
+    elif not api_key:
+        return {
+            "success": False,
+            "error": "API 키가 설정되지 않았습니다.",
+        }
 
     last_error = None
 
