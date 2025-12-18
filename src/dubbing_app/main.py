@@ -14,6 +14,11 @@ from dubbing_app.core.config import Config, load_config, save_config
 from dubbing_app.core.theme import THEMES, get_theme, apply_theme, get_status_color, AppTheme
 from dubbing_app.core.tts import KOREAN_VOICES
 from dubbing_app.core.transcript import get_video_info
+from dubbing_app.core.setup import (
+    is_ollama_installed, is_ollama_running, has_model,
+    install_ollama_macos, start_ollama_server, pull_model,
+    check_setup_status, DEFAULT_MODEL,
+)
 from dubbing_app.runner import DubbingJob, generate_job_id, run_dubbing, PauseController
 
 
@@ -530,11 +535,275 @@ class DubbingApp:
         self.check_ai_on_startup()
 
     def check_ai_on_startup(self):
-        """앱 시작 시 AI 설정 상태 확인"""
-        ok, msg = check_ai_config(self.config)
-        if not ok:
-            # 문제가 있으면 경고 + 설정 다이얼로그 표시
-            self.show_config_warning(msg)
+        """앱 시작 시 AI 설정 상태 확인 + Ollama 온보딩"""
+        # Ollama 사용 설정인 경우 온보딩 체크
+        if self.config.ai_engine == "ollama":
+            self.check_ollama_onboarding()
+        else:
+            ok, msg = check_ai_config(self.config)
+            if not ok:
+                self.show_config_warning(msg)
+
+    def check_ollama_onboarding(self):
+        """Ollama 온보딩 체크"""
+        status = check_setup_status()
+
+        # 1. Ollama 미설치
+        if not status["ollama_installed"]:
+            self.show_ollama_install_dialog()
+            return
+
+        # 2. Ollama 서버 미실행
+        if not status["ollama_running"]:
+            self.show_ollama_start_dialog()
+            return
+
+        # 3. gemma3 모델 미설치
+        if not status["has_gemma3"]:
+            self.show_model_download_dialog()
+            return
+
+        # 4. 모델 설정이 안 되어 있으면 gemma3로 설정
+        if not self.config.ollama_model:
+            self.config.ollama_model = "gemma3:latest"
+            save_config(self.config)
+
+    def show_ollama_install_dialog(self):
+        """Ollama 설치 다이얼로그"""
+        theme = self.theme
+        status_text = ft.Text("", color=theme.text_secondary, size=12)
+
+        def install_ollama(e):
+            status_text.value = "Homebrew로 Ollama 설치 중..."
+            status_text.update()
+            install_btn.disabled = True
+            install_btn.update()
+
+            def do_install():
+                success, msg = install_ollama_macos()
+                if success:
+                    status_text.value = "설치 완료! 앱을 다시 시작해주세요."
+                    status_text.color = theme.success
+                else:
+                    status_text.value = msg
+                    status_text.color = theme.error
+                    install_btn.disabled = False
+                status_text.update()
+                install_btn.update()
+
+            import threading
+            threading.Thread(target=do_install, daemon=True).start()
+
+        install_btn = styled_button("Homebrew로 설치", primary=True, theme=theme, on_click=install_ollama)
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(
+                [
+                    ft.Icon(ft.Icons.DOWNLOAD_ROUNDED, color=theme.accent, size=28),
+                    ft.Text("Ollama 설치 필요", color=theme.text_primary, weight=ft.FontWeight.BOLD),
+                ],
+                spacing=10,
+            ),
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "로컬 AI 번역을 위해 Ollama가 필요합니다.",
+                            color=theme.text_secondary,
+                            size=14,
+                        ),
+                        ft.Container(height=8),
+                        ft.Text(
+                            "Homebrew가 설치되어 있다면 자동으로 설치할 수 있습니다.",
+                            color=theme.text_muted,
+                            size=12,
+                        ),
+                        ft.Container(height=8),
+                        status_text,
+                    ],
+                    spacing=4,
+                ),
+                width=380,
+                padding=8,
+            ),
+            bgcolor=theme.card_bg,
+            actions=[
+                ft.TextButton("나중에", on_click=lambda e: self.page.close(dlg)),
+                install_btn,
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dlg)
+
+    def show_ollama_start_dialog(self):
+        """Ollama 서버 시작 다이얼로그"""
+        theme = self.theme
+        status_text = ft.Text("", color=theme.text_secondary, size=12)
+
+        def start_server(e):
+            status_text.value = "Ollama 서버 시작 중..."
+            status_text.update()
+            start_btn.disabled = True
+            start_btn.update()
+
+            def do_start():
+                success, msg = start_ollama_server()
+                if success:
+                    self.page.close(dlg)
+                    self.check_ollama_onboarding()  # 다음 단계로
+                else:
+                    status_text.value = msg
+                    status_text.color = theme.error
+                    start_btn.disabled = False
+                status_text.update()
+                start_btn.update()
+
+            import threading
+            threading.Thread(target=do_start, daemon=True).start()
+
+        start_btn = styled_button("서버 시작", primary=True, theme=theme, on_click=start_server)
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(
+                [
+                    ft.Icon(ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, color=theme.accent, size=28),
+                    ft.Text("Ollama 서버 시작", color=theme.text_primary, weight=ft.FontWeight.BOLD),
+                ],
+                spacing=10,
+            ),
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "Ollama가 설치되어 있지만 서버가 실행되지 않았습니다.",
+                            color=theme.text_secondary,
+                            size=14,
+                        ),
+                        ft.Container(height=8),
+                        ft.Text(
+                            "서버를 시작하시겠습니까?",
+                            color=theme.text_muted,
+                            size=12,
+                        ),
+                        ft.Container(height=8),
+                        status_text,
+                    ],
+                    spacing=4,
+                ),
+                width=380,
+                padding=8,
+            ),
+            bgcolor=theme.card_bg,
+            actions=[
+                ft.TextButton("나중에", on_click=lambda e: self.page.close(dlg)),
+                start_btn,
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dlg)
+
+    def show_model_download_dialog(self):
+        """모델 다운로드 다이얼로그"""
+        theme = self.theme
+        progress_text = ft.Text("", color=theme.text_secondary, size=11)
+        progress_bar = ft.ProgressBar(width=350, visible=False, color=theme.accent)
+
+        def download_model(e):
+            progress_text.value = "gemma3 모델 다운로드 중... (약 3GB)"
+            progress_bar.visible = True
+            progress_text.update()
+            progress_bar.update()
+            download_btn.disabled = True
+            download_btn.update()
+
+            def on_progress(line):
+                progress_text.value = line[:60] if len(line) > 60 else line
+                try:
+                    progress_text.update()
+                except Exception:
+                    pass
+
+            def do_download():
+                success, msg = pull_model(DEFAULT_MODEL, on_progress)
+                if success:
+                    progress_text.value = "다운로드 완료!"
+                    progress_text.color = theme.success
+                    # 설정에 모델 저장
+                    self.config.ollama_model = "gemma3:latest"
+                    save_config(self.config)
+                    progress_bar.visible = False
+                    try:
+                        progress_text.update()
+                        progress_bar.update()
+                    except Exception:
+                        pass
+                    import time
+                    time.sleep(1)
+                    try:
+                        self.page.close(dlg)
+                    except Exception:
+                        pass
+                else:
+                    progress_text.value = msg
+                    progress_text.color = theme.error
+                    download_btn.disabled = False
+                    progress_bar.visible = False
+                try:
+                    progress_text.update()
+                    progress_bar.update()
+                    download_btn.update()
+                except Exception:
+                    pass
+
+            import threading
+            threading.Thread(target=do_download, daemon=True).start()
+
+        download_btn = styled_button("gemma3 다운로드", primary=True, theme=theme, on_click=download_model)
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(
+                [
+                    ft.Icon(ft.Icons.SMART_TOY_ROUNDED, color=theme.accent, size=28),
+                    ft.Text("AI 모델 다운로드", color=theme.text_primary, weight=ft.FontWeight.BOLD),
+                ],
+                spacing=10,
+            ),
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "번역을 위한 AI 모델이 필요합니다.",
+                            color=theme.text_secondary,
+                            size=14,
+                        ),
+                        ft.Container(height=8),
+                        ft.Row(
+                            [
+                                ft.Icon(ft.Icons.CHECK_CIRCLE, color=theme.success, size=16),
+                                ft.Text("gemma3 - 빠르고 정확한 번역 (권장)", color=theme.text_muted, size=12),
+                            ],
+                            spacing=8,
+                        ),
+                        ft.Container(height=8),
+                        progress_bar,
+                        progress_text,
+                    ],
+                    spacing=4,
+                ),
+                width=380,
+                padding=8,
+            ),
+            bgcolor=theme.card_bg,
+            actions=[
+                ft.TextButton("나중에", on_click=lambda e: self.page.close(dlg)),
+                download_btn,
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dlg)
 
     def show_config_warning(self, message: str):
         """설정 경고 다이얼로그"""
