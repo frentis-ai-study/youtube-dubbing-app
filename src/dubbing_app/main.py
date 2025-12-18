@@ -1504,23 +1504,28 @@ class DubbingApp:
             cursor_color=theme.accent,
         )
 
-        if is_ollama and self.ollama_models:
-            model_field = ft.Dropdown(
+        # 모델 필드를 담을 컨테이너 (동적 교체용)
+        model_container = ft.Container()
+
+        def create_ollama_model_dropdown(models: list[str], current_value: str = None):
+            """Ollama 모델 드롭다운 생성"""
+            value = current_value if current_value in models else (models[0] if models else "gemma3:latest")
+            return ft.Dropdown(
                 label="모델",
-                value=self.config.zai_model
-                if self.config.zai_model in self.ollama_models
-                else self.ollama_models[0],
-                options=[ft.dropdown.Option(m) for m in self.ollama_models],
+                value=value,
+                options=[ft.dropdown.Option(m) for m in models],
                 width=380,
                 border_color=theme.border,
                 focused_border_color=theme.accent,
                 label_style=ft.TextStyle(color=theme.text_secondary),
                 text_style=ft.TextStyle(color=theme.text_primary),
             )
-        else:
-            model_field = ft.TextField(
+
+        def create_text_model_field(value: str):
+            """텍스트 모델 필드 생성"""
+            return ft.TextField(
                 label="모델",
-                value=self.config.zai_model,
+                value=value,
                 width=380,
                 border_color=theme.border,
                 focused_border_color=theme.accent,
@@ -1528,6 +1533,12 @@ class DubbingApp:
                 text_style=ft.TextStyle(color=theme.text_primary),
                 cursor_color=theme.accent,
             )
+
+        # 초기 모델 필드 설정
+        if is_ollama and self.ollama_models:
+            model_container.content = create_ollama_model_dropdown(self.ollama_models, self.config.zai_model)
+        else:
+            model_container.content = create_text_model_field(self.config.zai_model)
 
         output_dir_field = ft.TextField(
             label="출력 디렉토리",
@@ -1554,24 +1565,30 @@ class DubbingApp:
 
         def use_zai(e):
             base_url_field.value = PRESETS["z.ai"]["base_url"]
-            model_field.value = PRESETS["z.ai"]["default_model"]
             api_key_field.password = True
+            api_key_field.value = ""
+            # z.ai는 텍스트 필드로 모델 입력
+            model_container.content = create_text_model_field(PRESETS["z.ai"]["default_model"])
             self.page.update()
 
         def use_ollama(e):
             base_url_field.value = PRESETS["Ollama"]["base_url"]
             api_key_field.value = "ollama"
             api_key_field.password = False
+            # Ollama 모델 목록 갱신 후 드롭다운으로 교체
             self.ollama_models = get_ollama_models()
             if self.ollama_models:
-                model_field.value = self.ollama_models[0]
+                model_container.content = create_ollama_model_dropdown(self.ollama_models)
+            else:
+                model_container.content = create_text_model_field("gemma3:latest")
             self.page.update()
 
         def save_settings(e):
+            model_value = model_container.content.value
             self.config = Config(
                 zai_api_key=api_key_field.value,
                 zai_base_url=base_url_field.value,
-                zai_model=model_field.value if hasattr(model_field, "value") else model_field.value,
+                zai_model=model_value,
                 output_dir=output_dir_field.value,
                 tts_voice=voice_field.value,
                 tts_rate=self.config.tts_rate,
@@ -1603,7 +1620,7 @@ class DubbingApp:
                         ft.Divider(color=theme.divider),
                         api_key_field,
                         base_url_field,
-                        model_field,
+                        model_container,
                         ft.Divider(color=theme.divider),
                         output_dir_field,
                         voice_field,
