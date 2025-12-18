@@ -18,10 +18,10 @@ class Config:
     ollama_model: str = "gemma3:latest"
     ollama_base_url: str = "http://localhost:11434"
 
-    # z.ai API 설정
-    zai_api_key: str = ""
-    zai_base_url: str = "https://api.z.ai/api/coding/paas/v4"
-    zai_model: str = "GLM-4.6"
+    # API 설정 (Ollama 기본값)
+    zai_api_key: str = "ollama"  # Ollama는 API 키 불필요
+    zai_base_url: str = "http://localhost:11434/v1"  # Ollama 기본
+    zai_model: str = "gemma3:latest"
 
     # 출력 설정
     output_dir: str = str(Path.home() / "Dubbing")
