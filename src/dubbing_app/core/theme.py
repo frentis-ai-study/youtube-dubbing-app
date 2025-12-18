@@ -186,8 +186,10 @@ def get_status_color(theme: AppTheme, status: str) -> str:
     colors = {
         "pending": theme.text_muted,
         "running": theme.info,
+        "paused": theme.warning,
         "completed": theme.success,
         "error": theme.error,
+        "cancelled": theme.text_muted,
     }
     return colors.get(status, theme.text_muted)
 
@@ -197,7 +199,9 @@ def get_status_icon(status: str) -> str:
     icons = {
         "pending": "hourglass_empty",
         "running": "sync",
+        "paused": "pause_circle",
         "completed": "check_circle",
         "error": "error",
+        "cancelled": "cancel",
     }
     return icons.get(status, "help")

@@ -96,10 +96,19 @@ def _time_to_seconds(time_str: str) -> float:
     return 0.0
 
 
+def _is_sentence_end(text: str) -> bool:
+    """문장 끝 문자로 끝나는지 확인"""
+    if not text:
+        return False
+    text = text.rstrip()
+    return text.endswith(('.', '!', '?', '。', '！', '？', '…'))
+
+
 def split_segments_by_time(
     segments: list[dict],
     chunk_duration: int = 60,  # 1분 단위
-    max_chars: int = 2500,  # 최대 문자 수
+    max_chars: int = 1500,  # 최대 문자 수 (soft limit)
+    hard_limit: int = 2000,  # 절대 초과 불가
 ) -> list[list[dict]]:
     """
     세그먼트를 시간 + 문자 수 기준으로 청크 분할 (문장 경계 존중)
@@ -107,7 +116,8 @@ def split_segments_by_time(
     Args:
         segments: 자막 세그먼트 리스트 [{"start": "00:00:01.000", "end": "...", "text": "..."}]
         chunk_duration: 청크 길이 (초, 기본 1분)
-        max_chars: 최대 문자 수 (기본 2500자)
+        max_chars: 소프트 리밋 - 이 이상이면 문장 끝에서 분할 (기본 1500자)
+        hard_limit: 하드 리밋 - 문장 끝이 아니어도 강제 분할 (기본 2000자)
 
     Returns:
         list of segment groups
@@ -122,15 +132,24 @@ def split_segments_by_time(
 
     for seg in segments:
         seg_start = _time_to_seconds(seg["start"])
-        seg_chars = len(seg.get("text", ""))
+        seg_text = seg.get("text", "")
+        seg_chars = len(seg_text)
 
         # 새 청크 시작 조건:
         # 1. 시간 초과 (chunk_duration)
-        # 2. 문자 수 초과 (max_chars)
+        # 2. 하드 리밋 초과 (hard_limit) - 무조건 분할
+        # 3. 소프트 리밋 초과 (max_chars) + 이전 세그먼트가 문장 끝
         time_exceeded = current_chunk and (seg_start - chunk_start_time) >= chunk_duration
-        chars_exceeded = current_chunk and (current_chars + seg_chars) > max_chars
+        hard_exceeded = current_chunk and (current_chars + seg_chars) > hard_limit
 
-        if time_exceeded or chars_exceeded:
+        # 소프트 리밋: 현재 청크가 max_chars 이상이고, 마지막 세그먼트가 문장 끝이면 분할
+        soft_exceeded = (
+            current_chunk
+            and current_chars >= max_chars
+            and _is_sentence_end(current_chunk[-1].get("text", ""))
+        )
+
+        if time_exceeded or hard_exceeded or soft_exceeded:
             chunks.append(current_chunk)
             current_chunk = []
             chunk_start_time = seg_start
@@ -353,7 +372,7 @@ def translate_by_segments(
     base_url: str = "https://api.z.ai/api/coding/paas/v4",
     model: str = "GLM-4.6",
     chunk_duration: int = 60,  # 1분 단위
-    max_chars: int = 2500,  # 최대 문자 수
+    max_chars: int = 1500,  # 소프트 리밋 (문장 끝에서 분할)
     max_parallel: int = 3,  # 동시 번역 수
     on_progress: callable = None,
     chunks_dir: str | None = None,  # 청크 저장 디렉토리
@@ -367,7 +386,7 @@ def translate_by_segments(
         base_url: API 엔드포인트
         model: 모델명
         chunk_duration: 청크 길이 (초, 기본 1분)
-        max_chars: 최대 문자 수 (기본 2500자)
+        max_chars: 소프트 리밋 - 문장 끝에서 분할 (기본 1500자)
         max_parallel: 동시 번역 수 (기본 3)
         on_progress: 진행 콜백 (current, total)
         chunks_dir: 청크 저장 디렉토리 (지정 시 청크별 파일로 저장하여 재개 지원)
@@ -389,7 +408,7 @@ def translate_by_segments(
     # 시간 + 문자 수 기반으로 청크 분할
     time_chunks = split_segments_by_time(segments, chunk_duration, max_chars)
     total = len(time_chunks)
-    print(f"[번역] 총 {total}개 청크로 분할됨 ({chunk_duration}초/{max_chars}자 단위, 병렬 {max_parallel}개)", file=sys.stderr)
+    print(f"[번역] 총 {total}개 청크로 분할됨 ({chunk_duration}초/{max_chars}자 문장경계, 병렬 {max_parallel}개)", file=sys.stderr)
 
     # 청크 디렉토리 설정
     chunks_path = Path(chunks_dir) if chunks_dir else None

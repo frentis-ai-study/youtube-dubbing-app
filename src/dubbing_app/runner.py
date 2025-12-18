@@ -1,11 +1,58 @@
 """더빙 파이프라인 실행"""
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from dubbing_app.core.config import Config
+
+
+class PauseController:
+    """작업 일시 정지 컨트롤러"""
+
+    def __init__(self):
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # 초기 상태: 실행 중
+        self._cancelled = False
+
+    def pause(self):
+        """일시 정지"""
+        self._pause_event.clear()
+
+    def resume(self):
+        """재개"""
+        self._pause_event.set()
+
+    def cancel(self):
+        """취소"""
+        self._cancelled = True
+        self._pause_event.set()  # 대기 상태에서 빠져나오도록
+
+    def wait_if_paused(self, timeout: float = 0.5) -> bool:
+        """
+        일시 정지 상태면 대기, 취소되면 False 반환
+
+        Returns:
+            True: 계속 진행
+            False: 취소됨
+        """
+        while not self._pause_event.is_set():
+            self._pause_event.wait(timeout)
+            if self._cancelled:
+                return False
+        return not self._cancelled
+
+    @property
+    def is_paused(self) -> bool:
+        return not self._pause_event.is_set()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+
 from dubbing_app.core.transcript import (
     extract_transcript,
     get_video_info,
@@ -23,13 +70,14 @@ class DubbingJob:
     job_id: str
     url: str
     output_dir: Path
-    status: str = "pending"  # pending, running, completed, error
+    status: str = "pending"  # pending, running, paused, completed, error, cancelled
     progress: int = 0
     current_step: str = ""
     messages: list[str] = field(default_factory=list)
     error: str | None = None
     result_files: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
+    pause_controller: PauseController | None = None
 
 
 def generate_job_id() -> str:
@@ -42,6 +90,7 @@ def run_dubbing(
     output_dir: Path,
     config: Config,
     on_progress: Callable[[str, int], None] | None = None,
+    pause_controller: PauseController | None = None,
 ) -> DubbingJob:
     """
     더빙 파이프라인 실행
@@ -51,6 +100,7 @@ def run_dubbing(
         output_dir: 출력 디렉토리
         config: 앱 설정 (API 키 포함)
         on_progress: 진행 상황 콜백 (message, progress_percent)
+        pause_controller: 일시 정지 컨트롤러
 
     Returns:
         DubbingJob: 작업 결과
@@ -60,6 +110,7 @@ def run_dubbing(
         url=url,
         output_dir=output_dir,
         status="running",
+        pause_controller=pause_controller,
     )
 
     def log(msg: str, progress: int = 0):
@@ -68,6 +119,17 @@ def run_dubbing(
         job.current_step = msg
         if on_progress:
             on_progress(msg, progress)
+
+    def check_pause() -> bool:
+        """일시 정지 체크. 취소되면 False 반환"""
+        if pause_controller:
+            if pause_controller.is_paused:
+                log("일시 정지됨...", job.progress)
+            if not pause_controller.wait_if_paused():
+                job.status = "cancelled"
+                job.current_step = "작업 취소됨"
+                return False
+        return True
 
     try:
         # Step 0: Ollama 사용 시 사전 체크
@@ -83,6 +145,9 @@ def run_dubbing(
                 raise Exception(model_check.get("error"))
 
             log(f"Ollama 준비 완료 (모델: {config.zai_model})", 5)
+
+        if not check_pause():
+            return job
 
         # Step 1: 영상 정보 확인
         log("영상 정보 확인 중...", 5)
@@ -159,6 +224,9 @@ def run_dubbing(
 
             job.result_files.append(str(job_output_dir / "transcript_original.txt"))
 
+        if not check_pause():
+            return job
+
         # Step 3: 한국어 번역 (또는 기존 파일 사용)
         if resume_from in ("start", "translate"):
             log("한국어로 번역 중...", 40)
@@ -201,6 +269,9 @@ def run_dubbing(
             log("기존 번역 파일 사용", 70)
             korean_text = existing["korean_text"]
             job.result_files.append(str(job_output_dir / "transcript_korean.txt"))
+
+        if not check_pause():
+            return job
 
         # Step 4: TTS 음성 생성
         log("음성 생성 중...", 75)

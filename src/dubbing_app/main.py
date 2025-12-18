@@ -8,12 +8,13 @@ from datetime import datetime
 from pathlib import Path
 
 import flet as ft
+import flet_audio
 
 from dubbing_app.core.config import Config, load_config, save_config
 from dubbing_app.core.theme import THEMES, get_theme, apply_theme, get_status_color, AppTheme
 from dubbing_app.core.tts import KOREAN_VOICES
 from dubbing_app.core.transcript import get_video_info
-from dubbing_app.runner import DubbingJob, generate_job_id, run_dubbing
+from dubbing_app.runner import DubbingJob, generate_job_id, run_dubbing, PauseController
 
 
 # Toast severity
@@ -197,6 +198,11 @@ class JobCard(ft.Container):
         on_start_single=None,
         page=None,
         on_play=None,
+        on_pause=None,
+        on_resume=None,
+        on_cancel=None,
+        playing_audio_path: str | None = None,
+        is_audio_playing: bool = False,
     ):
         self.job = job
         self.theme = theme
@@ -204,7 +210,12 @@ class JobCard(ft.Container):
         self.on_retry = on_retry
         self.on_start_single = on_start_single
         self.on_play = on_play
+        self.on_pause = on_pause
+        self.on_resume = on_resume
+        self.on_cancel = on_cancel
         self.page = page
+        self.playing_audio_path = playing_audio_path
+        self.is_audio_playing = is_audio_playing
 
         status = job["status"]
         status_color = get_status_color(theme, status)
@@ -213,8 +224,10 @@ class JobCard(ft.Container):
         status_icons = {
             "pending": ft.Icons.HOURGLASS_EMPTY,
             "running": ft.Icons.SYNC,
+            "paused": ft.Icons.PAUSE_CIRCLE,
             "completed": ft.Icons.CHECK_CIRCLE,
             "error": ft.Icons.ERROR,
+            "cancelled": ft.Icons.CANCEL,
         }
         status_icon = status_icons.get(status, ft.Icons.HELP)
 
@@ -260,15 +273,50 @@ class JobCard(ft.Container):
                     on_click=lambda e: on_start_single(job) if on_start_single else None,
                 )
             )
+        elif job["status"] == "running":
+            # 실행 중: 일시 정지 버튼
+            actions.append(
+                ft.IconButton(
+                    icon=ft.Icons.PAUSE_ROUNDED,
+                    tooltip="일시 정지",
+                    icon_color=theme.warning,
+                    icon_size=20,
+                    on_click=lambda e: on_pause(job) if on_pause else None,
+                )
+            )
+        elif job["status"] == "paused":
+            # 일시 정지 중: 재개, 취소 버튼
+            actions.append(
+                ft.IconButton(
+                    icon=ft.Icons.PLAY_ARROW_ROUNDED,
+                    tooltip="재개",
+                    icon_color=theme.success,
+                    icon_size=20,
+                    on_click=lambda e: on_resume(job) if on_resume else None,
+                )
+            )
+            actions.append(
+                ft.IconButton(
+                    icon=ft.Icons.STOP_ROUNDED,
+                    tooltip="취소",
+                    icon_color=theme.error,
+                    icon_size=20,
+                    on_click=lambda e: on_cancel(job) if on_cancel else None,
+                )
+            )
         elif job["status"] == "completed":
             result_files = job.get("result_files", [])
             audio_file = next((f for f in result_files if f.endswith(".mp3")), None)
 
             if audio_file and on_play:
+                # 현재 이 파일이 재생 중인지 확인
+                is_this_playing = (
+                    self.playing_audio_path == audio_file and self.is_audio_playing
+                )
                 actions.append(
                     ft.IconButton(
-                        icon=ft.Icons.PLAY_CIRCLE_FILLED,
-                        tooltip="재생",
+                        icon=ft.Icons.PAUSE_CIRCLE_FILLED if is_this_playing else ft.Icons.PLAY_CIRCLE_FILLED,
+                        tooltip="일시정지" if is_this_playing else "재생",
                         icon_color=theme.accent,
                         icon_size=22,
                         on_click=lambda e, f=audio_file: on_play(f),
@@ -437,11 +485,16 @@ class JobCard(ft.Container):
 
     def _on_hover(self, e):
         """호버 효과"""
-        if e.data == "true":
-            self.border = ft.border.all(1, self.theme.accent)
-        else:
-            self.border = ft.border.all(1, self.theme.border)
-        self.update()
+        if not self.theme:
+            return
+        try:
+            if e.data == "true":
+                self.border = ft.border.all(1, self.theme.accent)
+            else:
+                self.border = ft.border.all(1, self.theme.border)
+            self.update()
+        except Exception:
+            pass
 
     def open_folder(self, path: str):
         try:
@@ -467,8 +520,10 @@ class DubbingApp:
         self.ollama_models: list[str] = []
         self.job_queue: asyncio.Queue = asyncio.Queue()
         self.worker_running = False
-        self.current_audio: ft.Audio | None = None
+        self.current_audio = None
+        self.current_audio_path: str | None = None
         self.is_playing = False
+        self.pause_controllers: dict[str, PauseController] = {}  # job_id -> PauseController
 
         self.setup_page()
         self.build_ui()
@@ -543,7 +598,7 @@ class DubbingApp:
             self.show_toast("오디오 파일을 찾을 수 없습니다", severity=ToastSeverity.CRITICAL)
             return
 
-        if self.current_audio and self.current_audio.src == audio_path:
+        if self.current_audio and self.current_audio_path == audio_path:
             if self.is_playing:
                 self.current_audio.pause()
                 self.is_playing = False
@@ -552,13 +607,15 @@ class DubbingApp:
                 self.current_audio.resume()
                 self.is_playing = True
                 self.show_toast("재생 중...", severity=ToastSeverity.INFORMATIONAL)
+            self.refresh_jobs_list()
             return
 
         if self.current_audio:
             self.current_audio.pause()
             self.page.overlay.remove(self.current_audio)
 
-        self.current_audio = ft.Audio(
+        self.current_audio_path = audio_path
+        self.current_audio = flet_audio.Audio(
             src=audio_path,
             autoplay=True,
             on_state_changed=lambda e: self._on_audio_state_changed(e),
@@ -569,11 +626,14 @@ class DubbingApp:
 
         filename = Path(audio_path).stem
         self.show_toast(f"재생: {filename[:30]}...", severity=ToastSeverity.SUCCESS)
+        self.refresh_jobs_list()
 
     def _on_audio_state_changed(self, e):
         if e.data == "completed":
             self.is_playing = False
+            self.current_audio_path = None
             self.show_toast("재생 완료", severity=ToastSeverity.SUCCESS)
+            self.refresh_jobs_list()
 
     def on_start_all_click(self, e):
         self.page.run_task(self.start_all_jobs)
@@ -816,6 +876,11 @@ class DubbingApp:
                         self.start_single_job,
                         self.page,
                         self.play_audio,
+                        self.pause_job,
+                        self.resume_job,
+                        self.cancel_job,
+                        self.current_audio_path,
+                        self.is_playing,
                     )
                 )
 
@@ -855,6 +920,11 @@ class DubbingApp:
                         self.start_single_job,
                         self.page,
                         self.play_audio,
+                        self.pause_job,
+                        self.resume_job,
+                        self.cancel_job,
+                        self.current_audio_path,
+                        self.is_playing,
                     )
                 )
 
@@ -917,6 +987,41 @@ class DubbingApp:
         save_jobs(self.jobs)
         self.refresh_jobs_list()
 
+    def pause_job(self, job: dict):
+        """작업 일시 정지"""
+        job_id = job.get("job_id")
+        if job_id and job_id in self.pause_controllers:
+            self.pause_controllers[job_id].pause()
+            job["status"] = "paused"
+            job["current_step"] = "일시 정지됨"
+            save_jobs(self.jobs)
+            self.refresh_jobs_list()
+            self.show_toast("작업 일시 정지됨", severity=ToastSeverity.WARNING)
+
+    def resume_job(self, job: dict):
+        """작업 재개"""
+        job_id = job.get("job_id")
+        if job_id and job_id in self.pause_controllers:
+            self.pause_controllers[job_id].resume()
+            job["status"] = "running"
+            job["current_step"] = "재개됨..."
+            save_jobs(self.jobs)
+            self.refresh_jobs_list()
+            self.show_toast("작업 재개됨", severity=ToastSeverity.SUCCESS)
+
+    def cancel_job(self, job: dict):
+        """작업 취소"""
+        job_id = job.get("job_id")
+        if job_id and job_id in self.pause_controllers:
+            self.pause_controllers[job_id].cancel()
+            job["status"] = "cancelled"
+            job["current_step"] = "취소됨"
+            save_jobs(self.jobs)
+            self.refresh_jobs_list()
+            self.show_toast("작업 취소됨", severity=ToastSeverity.WARNING)
+            # 컨트롤러 정리
+            del self.pause_controllers[job_id]
+
     def clear_completed(self, e):
         self.jobs = [j for j in self.jobs if j["status"] not in ("completed", "error")]
         save_jobs(self.jobs)
@@ -969,6 +1074,11 @@ class DubbingApp:
         save_jobs(self.jobs)
         self.refresh_jobs_list()
 
+        # PauseController 생성 및 저장
+        job_id = job.get("job_id")
+        pause_controller = PauseController()
+        self.pause_controllers[job_id] = pause_controller
+
         def on_progress(msg: str, progress: int):
             job["current_step"] = msg
             job["progress"] = progress
@@ -986,6 +1096,7 @@ class DubbingApp:
                     output_dir=output_dir,
                     config=self.config,
                     on_progress=on_progress,
+                    pause_controller=pause_controller,
                 ),
             )
 
@@ -999,11 +1110,17 @@ class DubbingApp:
                 if result.result_files:
                     job["output_dir"] = str(Path(result.result_files[0]).parent)
                 self.show_toast("더빙 완료!", severity=ToastSeverity.SUCCESS)
+            elif result.status == "cancelled":
+                self.show_toast("작업 취소됨", severity=ToastSeverity.WARNING)
 
         except Exception as e:
             job["status"] = "error"
             job["error"] = str(e)
             self.show_toast(f"오류: {str(e)[:50]}", severity=ToastSeverity.CRITICAL)
+
+        # PauseController 정리
+        if job_id in self.pause_controllers:
+            del self.pause_controllers[job_id]
 
         save_jobs(self.jobs)
         self.refresh_jobs_list()
