@@ -156,32 +156,53 @@ def start_ollama_server() -> tuple[bool, str]:
 
 
 def pull_model(model_name: str, on_progress=None) -> tuple[bool, str]:
-    """모델 다운로드"""
-    ollama_path = find_ollama_path()
-    if not ollama_path:
-        return False, "Ollama가 설치되어 있지 않습니다."
-
+    """모델 다운로드 (HTTP API 사용 - 샌드박스 호환)"""
     try:
-        process = subprocess.Popen(
-            [ollama_path, "pull", model_name],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        # Ollama HTTP API로 모델 pull (스트리밍)
+        with httpx.stream(
+            "POST",
+            "http://localhost:11434/api/pull",
+            json={"name": model_name, "stream": True},
+            timeout=600,  # 10분 타임아웃
+        ) as response:
+            if response.status_code != 200:
+                return False, f"API 오류: {response.status_code}"
 
-        output_lines = []
-        for line in process.stdout:
-            line = line.strip()
-            output_lines.append(line)
-            if on_progress:
-                on_progress(line)
+            last_status = ""
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                try:
+                    import json
+                    data = json.loads(line)
+                    status = data.get("status", "")
 
-        process.wait()
+                    # 진행 상황 콜백
+                    if on_progress:
+                        if "completed" in data and "total" in data:
+                            pct = int(data["completed"] / data["total"] * 100)
+                            on_progress(f"{status} {pct}%")
+                        else:
+                            on_progress(status)
 
-        if process.returncode == 0:
+                    last_status = status
+
+                    # 에러 체크
+                    if "error" in data:
+                        return False, data["error"]
+                except json.JSONDecodeError:
+                    pass
+
+        # 다운로드 완료 확인
+        if has_model(model_name):
             return True, f"{model_name} 모델 다운로드 완료"
         else:
-            return False, f"다운로드 실패: {output_lines[-1] if output_lines else 'Unknown error'}"
+            return False, f"다운로드 실패: {last_status}"
+
+    except httpx.TimeoutException:
+        return False, "다운로드 시간 초과 (10분)"
+    except httpx.ConnectError:
+        return False, "Ollama 서버에 연결할 수 없습니다. Ollama가 실행 중인지 확인하세요."
     except Exception as e:
         return False, f"다운로드 오류: {e}"
 
