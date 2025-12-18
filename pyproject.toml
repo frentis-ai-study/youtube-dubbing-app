@@ -1,6 +1,6 @@
 [project]
 name = "youtube-dubbing-app"
-version = "0.3.0"
+version = "0.1.0"
 description = "YouTube 영상을 한국어 음성으로 더빙하는 앱"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,8 +17,15 @@ dependencies = [
 [project.scripts]
 dubbing-app = "dubbing_app.main:main"
 
+[tool.flet]
+org = "com.frentis"
+product = "YouTube Dubbing"
+
+[tool.flet.app]
+path = "src"
+
 [tool.flet.macos]
-target_arch = ["arm64"]
+build_arch = "arm64"
 
 [build-system]
 requires = ["hatchling"]

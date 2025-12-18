@@ -2,56 +2,98 @@
 
 import subprocess
 import sys
+import os
+import httpx
 from pathlib import Path
+
+# Ollama 가능한 경로들 (macOS)
+OLLAMA_PATHS = [
+    "/opt/homebrew/bin/ollama",  # Apple Silicon Homebrew
+    "/usr/local/bin/ollama",     # Intel Homebrew
+    "/usr/bin/ollama",           # 시스템
+    "ollama",                    # PATH에 있는 경우
+]
+
+BREW_PATHS = [
+    "/opt/homebrew/bin/brew",    # Apple Silicon
+    "/usr/local/bin/brew",       # Intel
+]
+
+
+def find_ollama_path() -> str | None:
+    """Ollama 실행 파일 경로 찾기"""
+    for path in OLLAMA_PATHS:
+        if path == "ollama":
+            # PATH에서 찾기
+            try:
+                result = subprocess.run(
+                    ["which", "ollama"],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:" + os.environ.get("PATH", "")},
+                )
+                if result.returncode == 0:
+                    return result.stdout.strip()
+            except Exception:
+                pass
+        elif Path(path).exists():
+            return path
+    return None
+
+
+def find_brew_path() -> str | None:
+    """Homebrew 실행 파일 경로 찾기"""
+    for path in BREW_PATHS:
+        if Path(path).exists():
+            return path
+    return None
 
 
 def is_ollama_installed() -> bool:
     """Ollama 설치 여부 확인"""
-    try:
-        result = subprocess.run(
-            ["which", "ollama"],
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    return find_ollama_path() is not None
 
 
 def is_ollama_running() -> bool:
-    """Ollama 서버 실행 여부 확인"""
+    """Ollama 서버 실행 여부 확인 (HTTP API 사용)"""
     try:
-        result = subprocess.run(
-            ["curl", "-s", "http://localhost:11434/api/tags"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return result.returncode == 0
+        response = httpx.get("http://localhost:11434/api/tags", timeout=3)
+        return response.status_code == 200
     except Exception:
         return False
 
 
 def get_ollama_models() -> list[str]:
-    """설치된 Ollama 모델 목록"""
+    """설치된 Ollama 모델 목록 (HTTP API 사용)"""
     try:
-        result = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return []
-
-        models = []
-        for line in result.stdout.strip().split("\n")[1:]:  # 헤더 스킵
-            if line.strip():
-                model_name = line.split()[0]
-                models.append(model_name)
-        return models
-    except Exception:
+        response = httpx.get("http://localhost:11434/api/tags", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return [m["name"] for m in data.get("models", [])]
         return []
+    except Exception:
+        # 서버 안 떠있으면 CLI 시도
+        ollama_path = find_ollama_path()
+        if not ollama_path:
+            return []
+        try:
+            result = subprocess.run(
+                [ollama_path, "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return []
+
+            models = []
+            for line in result.stdout.strip().split("\n")[1:]:  # 헤더 스킵
+                if line.strip():
+                    model_name = line.split()[0]
+                    models.append(model_name)
+            return models
+        except Exception:
+            return []
 
 
 def has_model(model_name: str) -> bool:
@@ -68,13 +110,13 @@ def install_ollama_macos() -> tuple[bool, str]:
     """macOS에서 Ollama 설치 (Homebrew)"""
     try:
         # Homebrew 확인
-        brew_check = subprocess.run(["which", "brew"], capture_output=True)
-        if brew_check.returncode != 0:
+        brew_path = find_brew_path()
+        if not brew_path:
             return False, "Homebrew가 설치되어 있지 않습니다.\nhttps://brew.sh 에서 설치 후 다시 시도하세요."
 
         # Ollama 설치
         result = subprocess.run(
-            ["brew", "install", "ollama"],
+            [brew_path, "install", "ollama"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -91,10 +133,14 @@ def install_ollama_macos() -> tuple[bool, str]:
 
 def start_ollama_server() -> tuple[bool, str]:
     """Ollama 서버 시작"""
+    ollama_path = find_ollama_path()
+    if not ollama_path:
+        return False, "Ollama가 설치되어 있지 않습니다."
+
     try:
         # 백그라운드로 시작
         subprocess.Popen(
-            ["ollama", "serve"],
+            [ollama_path, "serve"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -111,9 +157,13 @@ def start_ollama_server() -> tuple[bool, str]:
 
 def pull_model(model_name: str, on_progress=None) -> tuple[bool, str]:
     """모델 다운로드"""
+    ollama_path = find_ollama_path()
+    if not ollama_path:
+        return False, "Ollama가 설치되어 있지 않습니다."
+
     try:
         process = subprocess.Popen(
-            ["ollama", "pull", model_name],
+            [ollama_path, "pull", model_name],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
