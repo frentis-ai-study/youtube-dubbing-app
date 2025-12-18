@@ -107,6 +107,12 @@ youtube-dubbing-app/
     └── 영상제목.mp3            # 한국어 음성
 ```
 
+## 개발
+
+**Frentis Co., Ltd.**
+대표: 윤성열
+https://frentis.co.kr
+
 ## 라이선스
 
 MIT
