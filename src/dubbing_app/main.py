@@ -1102,7 +1102,7 @@ class DubbingApp:
         self.pending_list.controls.clear()
         self.completed_list.controls.clear()
 
-        pending_jobs = [j for j in self.jobs if j["status"] in ("pending", "running", "error")]
+        pending_jobs = [j for j in self.jobs if j["status"] in ("pending", "running", "paused", "error")]
         completed_jobs = [j for j in self.jobs if j["status"] == "completed"]
 
         if self.tabs.tabs:
