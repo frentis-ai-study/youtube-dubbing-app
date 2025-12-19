@@ -5,7 +5,14 @@ import json
 import subprocess
 from dataclasses import asdict
 from datetime import datetime
+from importlib.metadata import version, PackageNotFoundError
 from pathlib import Path
+
+# 버전 정보 (pyproject.toml에서 자동 로드)
+try:
+    APP_VERSION = version("youtube-dubbing-app")
+except PackageNotFoundError:
+    APP_VERSION = "dev"
 
 import flet as ft
 import flet_audio
@@ -1182,6 +1189,12 @@ class DubbingApp:
                                 icon_color=theme.text_secondary,
                                 on_click=self.show_settings,
                             ),
+                            ft.IconButton(
+                                icon=ft.Icons.INFO_OUTLINE_ROUNDED,
+                                tooltip="정보",
+                                icon_color=theme.text_secondary,
+                                on_click=self.show_about,
+                            ),
                         ],
                         spacing=4,
                     ),
@@ -1648,6 +1661,55 @@ class DubbingApp:
         self.page.controls.clear()
         self.build_ui()
         self.show_toast(f"테마: {self.theme.display_name}", severity=ToastSeverity.SUCCESS)
+
+    def show_about(self, e):
+        """정보 다이얼로그"""
+        theme = self.theme
+
+        def close_dialog(e):
+            dialog.open = False
+            self.page.update()
+
+        def open_github(e):
+            subprocess.run(["open", "https://github.com/frentis-ai-study/youtube-dubbing-app"])
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(
+                [
+                    ft.Icon(ft.Icons.MOVIE_FILTER_ROUNDED, size=18, color=theme.primary),
+                    ft.Text("YouTube Dubbing", weight=ft.FontWeight.BOLD, size=14),
+                    ft.Text(f"v{APP_VERSION}", size=11, color=theme.text_muted),
+                ],
+                spacing=6,
+            ),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "YouTube 영상을 한국어 음성으로 더빙하는 앱\nOllama 또는 z.ai API 필요",
+                        size=11,
+                        color=theme.text_secondary,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Row(
+                        [
+                            ft.TextButton("GitHub", icon=ft.Icons.OPEN_IN_NEW_ROUNDED, on_click=open_github),
+                            ft.TextButton("닫기", on_click=close_dialog),
+                        ],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=0,
+                    ),
+                    ft.Text("© 2025 Frentis", size=9, color=theme.text_muted),
+                ],
+                spacing=8,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                tight=True,
+            ),
+        )
+
+        self.page.overlay.append(dialog)
+        dialog.open = True
+        self.page.update()
 
     def show_settings(self, e):
         """설정 다이얼로그"""
