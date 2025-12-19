@@ -205,7 +205,7 @@ def _format_time(seconds: float) -> str:
 
 def get_video_info(url: str) -> dict:
     """
-    YouTube 영상 정보 가져오기
+    YouTube 영상 정보 가져오기 (자막 언어 정보 포함)
 
     Returns:
         dict: {
@@ -217,11 +217,14 @@ def get_video_info(url: str) -> dict:
             "video_id": str,
             "url": str (원본 URL),
             "description": str (영상 설명, 처음 200자),
+            "available_subtitles": list[dict],  # 가용 자막 목록
         }
     """
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -238,6 +241,32 @@ def get_video_info(url: str) -> dict:
         if len(description) > 200:
             description = description[:200] + "..."
 
+        # 자막 언어 정보 수집
+        subtitles = info.get("subtitles", {})
+        auto_captions = info.get("automatic_captions", {})
+
+        available_subtitles = []
+        # 수동 자막 (우선)
+        for lang in subtitles.keys():
+            available_subtitles.append({
+                "lang": lang,
+                "is_auto": False,
+                "label": _get_language_label(lang),
+            })
+        # 자동 자막
+        for lang in auto_captions.keys():
+            # 수동 자막이 없는 언어만 추가
+            if lang not in subtitles:
+                available_subtitles.append({
+                    "lang": lang,
+                    "is_auto": True,
+                    "label": _get_language_label(lang) + " (자동)",
+                })
+
+        # 언어 코드 기준 정렬 (en, ko 우선)
+        priority = {"en": 0, "en-US": 1, "en-GB": 2, "ko": 3, "ja": 4}
+        available_subtitles.sort(key=lambda x: (priority.get(x["lang"], 100), x["lang"]))
+
         return {
             "title": info.get("title", "unknown"),
             "duration": info.get("duration", 0),
@@ -247,7 +276,40 @@ def get_video_info(url: str) -> dict:
             "video_id": video_id,
             "url": url,
             "description": description,
+            "available_subtitles": available_subtitles,
         }
+
+
+# 언어 코드 → 표시 이름 매핑
+LANGUAGE_LABELS = {
+    "en": "English",
+    "en-US": "English (US)",
+    "en-GB": "English (UK)",
+    "ko": "한국어",
+    "ja": "日本語",
+    "zh": "中文",
+    "zh-Hans": "中文 (简体)",
+    "zh-Hant": "中文 (繁體)",
+    "es": "Español",
+    "fr": "Français",
+    "de": "Deutsch",
+    "pt": "Português",
+    "ru": "Русский",
+    "ar": "العربية",
+    "hi": "हिन्दी",
+    "it": "Italiano",
+    "nl": "Nederlands",
+    "pl": "Polski",
+    "tr": "Türkçe",
+    "vi": "Tiếng Việt",
+    "th": "ไทย",
+    "id": "Bahasa Indonesia",
+}
+
+
+def _get_language_label(lang_code: str) -> str:
+    """언어 코드를 표시 이름으로 변환"""
+    return LANGUAGE_LABELS.get(lang_code, lang_code.upper())
 
 
 def sanitize_filename(title: str) -> str:

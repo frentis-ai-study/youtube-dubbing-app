@@ -91,6 +91,7 @@ def run_dubbing(
     config: Config,
     on_progress: Callable[[str, int], None] | None = None,
     pause_controller: PauseController | None = None,
+    source_lang: str = "en",
 ) -> DubbingJob:
     """
     더빙 파이프라인 실행
@@ -101,6 +102,7 @@ def run_dubbing(
         config: 앱 설정 (API 키 포함)
         on_progress: 진행 상황 콜백 (message, progress_percent)
         pause_controller: 일시 정지 컨트롤러
+        source_lang: 자막 언어 코드 (기본: en)
 
     Returns:
         DubbingJob: 작업 결과
@@ -192,8 +194,8 @@ def run_dubbing(
         segments_file = job_output_dir / "segments.json"
 
         if resume_from == "start":
-            log("자막 추출 중...", 20)
-            transcript_result = extract_transcript(url)
+            log(f"자막 추출 중... (언어: {source_lang})", 20)
+            transcript_result = extract_transcript(url, lang=source_lang)
 
             if not transcript_result["success"]:
                 raise Exception(f"자막 추출 실패: {transcript_result.get('error', '알 수 없는 오류')}")
@@ -246,6 +248,8 @@ def run_dubbing(
                 on_progress=translation_progress,
                 segments=segments if segments else None,
                 chunks_dir=str(chunks_dir),
+                translation_style=config.translation_style,
+                translation_tone=config.translation_tone,
             )
 
             if not translation_result["success"]:

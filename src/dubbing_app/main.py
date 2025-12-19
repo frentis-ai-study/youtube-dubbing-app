@@ -208,6 +208,7 @@ class JobCard(ft.Container):
         on_cancel=None,
         playing_audio_path: str | None = None,
         is_audio_playing: bool = False,
+        on_lang_change=None,
     ):
         self.job = job
         self.theme = theme
@@ -221,6 +222,7 @@ class JobCard(ft.Container):
         self.page = page
         self.playing_audio_path = playing_audio_path
         self.is_audio_playing = is_audio_playing
+        self.on_lang_change = on_lang_change
 
         status = job["status"]
         status_color = get_status_color(theme, status)
@@ -416,7 +418,7 @@ class JobCard(ft.Container):
                                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
-                            # 채널 + 재생시간
+                            # 채널 + 재생시간 + 자막 언어
                             ft.Row(
                                 [
                                     ft.Text(
@@ -438,6 +440,7 @@ class JobCard(ft.Container):
                                     )
                                     if duration_str
                                     else ft.Container(),
+                                    self._build_subtitle_dropdown(job, theme, status),
                                 ],
                                 spacing=10,
                             ),
@@ -512,6 +515,66 @@ class JobCard(ft.Container):
             subprocess.run(["open", url])
         except Exception:
             pass
+
+    def _build_subtitle_dropdown(self, job: dict, theme: AppTheme, status: str):
+        """자막 언어 드롭다운 생성 (pending 상태일 때만)"""
+        video_info = job.get("video_info", {})
+        available_subs = video_info.get("available_subtitles", [])
+        current_lang = job.get("source_lang", "en")
+
+        # pending 상태가 아니거나 자막 목록이 없으면 현재 언어만 표시
+        if status != "pending" or not available_subs:
+            # 현재 선택된 언어 라벨 찾기
+            label = current_lang
+            for sub in available_subs:
+                if sub["lang"] == current_lang:
+                    label = sub["label"]
+                    break
+            if not available_subs:
+                return ft.Container()
+            return ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Icon(ft.Icons.SUBTITLES_ROUNDED, size=11, color=theme.text_muted),
+                        ft.Text(label, size=10, color=theme.text_muted),
+                    ],
+                    spacing=4,
+                ),
+                bgcolor=theme.surface,
+                padding=ft.padding.symmetric(horizontal=6, vertical=3),
+                border_radius=4,
+            )
+
+        # pending 상태: 드롭다운 표시
+        def on_change(e):
+            job["source_lang"] = e.control.value
+            if self.on_lang_change:
+                self.on_lang_change(job)
+
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.SUBTITLES_ROUNDED, size=12, color=theme.text_muted),
+                    ft.Dropdown(
+                        value=current_lang,
+                        width=110,
+                        text_size=10,
+                        options=[
+                            ft.dropdown.Option(sub["lang"], sub["label"])
+                            for sub in available_subs
+                        ],
+                        border_color=theme.border,
+                        focused_border_color=theme.accent,
+                        text_style=ft.TextStyle(color=theme.text_primary, size=10),
+                        content_padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                        dense=True,
+                        on_change=on_change,
+                    ),
+                ],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
 
 
 class DubbingApp:
@@ -907,6 +970,26 @@ class DubbingApp:
     def on_start_all_click(self, e):
         self.page.run_task(self.start_all_jobs)
 
+    def _on_style_change(self, e):
+        """번역 스타일 변경 시"""
+        style = e.control.value
+        self.config.translation_style = style
+        save_config(self.config)
+
+        # natural 스타일일 때만 톤 드롭다운 활성화
+        self.tone_dropdown.disabled = style != "natural"
+        self.tone_dropdown.update()
+
+    def _on_tone_change(self, e):
+        """번역 톤 변경 시"""
+        self.config.translation_tone = e.control.value
+        save_config(self.config)
+
+    def _on_subtitle_lang_change(self, e):
+        """자막 언어 변경 시"""
+        self.config.source_lang = e.control.value
+        save_config(self.config)
+
     def build_ui(self):
         """UI 구성"""
         theme = self.theme
@@ -914,9 +997,60 @@ class DubbingApp:
         # URL 입력
         self.url_input = styled_textfield(
             placeholder="YouTube URL을 입력하세요...",
-            width=500,
+            width=420,
             theme=theme,
             on_submit=lambda e: self.add_job(e),
+        )
+
+        # 번역 스타일 라디오 버튼
+        self.style_radio = ft.RadioGroup(
+            value=self.config.translation_style,
+            content=ft.Row(
+                [
+                    ft.Radio(value="faithful", label="원문 충실", fill_color=theme.accent),
+                    ft.Radio(value="natural", label="자연스러운 더빙", fill_color=theme.accent),
+                ],
+                spacing=8,
+            ),
+            on_change=self._on_style_change,
+        )
+
+        # 톤 드롭다운 (자연스러운 더빙 선택 시만 활성화)
+        self.tone_dropdown = ft.Dropdown(
+            value=self.config.translation_tone,
+            width=100,
+            options=[
+                ft.dropdown.Option("lecture", "강의체"),
+                ft.dropdown.Option("casual", "대화체"),
+                ft.dropdown.Option("formal", "뉴스체"),
+            ],
+            border_color=theme.border,
+            focused_border_color=theme.accent,
+            text_style=ft.TextStyle(color=theme.text_primary, size=12),
+            content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
+            disabled=self.config.translation_style != "natural",
+            on_change=self._on_tone_change,
+        )
+
+        # 기본 자막 언어 드롭다운 (새 작업 추가 시 기본값으로 사용)
+        self.subtitle_lang_dropdown = ft.Dropdown(
+            value=self.config.source_lang,
+            width=110,
+            options=[
+                ft.dropdown.Option("en", "English"),
+                ft.dropdown.Option("ko", "한국어"),
+                ft.dropdown.Option("ja", "日本語"),
+                ft.dropdown.Option("zh", "中文"),
+                ft.dropdown.Option("es", "Español"),
+                ft.dropdown.Option("fr", "Français"),
+                ft.dropdown.Option("de", "Deutsch"),
+            ],
+            border_color=theme.border,
+            focused_border_color=theme.accent,
+            text_style=ft.TextStyle(color=theme.text_primary, size=12),
+            content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
+            dense=True,
+            on_change=self._on_subtitle_lang_change,
         )
 
         # 진행중 탭 - 작업 목록
@@ -1061,18 +1195,41 @@ class DubbingApp:
 
         # 입력 영역
         input_area = ft.Container(
-            content=ft.Row(
+            content=ft.Column(
                 [
-                    self.url_input,
-                    styled_button(
-                        "추가",
-                        primary=True,
-                        theme=theme,
-                        on_click=self.add_job,
+                    # URL 입력 + 추가 버튼
+                    ft.Row(
+                        [
+                            self.url_input,
+                            styled_button(
+                                "추가",
+                                primary=True,
+                                theme=theme,
+                                on_click=self.add_job,
+                            ),
+                        ],
+                        spacing=12,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                    # 번역 옵션
+                    ft.Row(
+                        [
+                            ft.Text("번역:", size=12, color=theme.text_secondary),
+                            self.style_radio,
+                            ft.Container(width=12),
+                            ft.Text("톤:", size=12, color=theme.text_secondary),
+                            self.tone_dropdown,
+                            ft.Container(width=12),
+                            ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=16, color=theme.text_secondary),
+                            self.subtitle_lang_dropdown,
+                        ],
+                        spacing=6,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                 ],
                 spacing=12,
-                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             padding=ft.padding.symmetric(horizontal=24, vertical=16),
             bgcolor=theme.background,
@@ -1150,6 +1307,7 @@ class DubbingApp:
                         self.cancel_job,
                         self.current_audio_path,
                         self.is_playing,
+                        self.change_subtitle_lang,
                     )
                 )
 
@@ -1194,6 +1352,7 @@ class DubbingApp:
                         self.cancel_job,
                         self.current_audio_path,
                         self.is_playing,
+                        None,  # on_lang_change - 완료된 작업은 언어 변경 불가
                     )
                 )
 
@@ -1220,7 +1379,18 @@ class DubbingApp:
                     None, lambda: get_video_info(url)
                 )
             except Exception:
-                video_info = {"title": "정보 로드 실패", "url": url}
+                video_info = {"title": "정보 로드 실패", "url": url, "available_subtitles": []}
+
+            # 자막 언어 결정: 기본 언어가 가용 목록에 있으면 사용, 없으면 첫 번째
+            available_subs = video_info.get("available_subtitles", [])
+            default_lang = self.config.source_lang
+            if available_subs:
+                if any(sub["lang"] == default_lang for sub in available_subs):
+                    selected_lang = default_lang
+                else:
+                    selected_lang = available_subs[0]["lang"]
+            else:
+                selected_lang = default_lang
 
             job = {
                 "job_id": generate_job_id(),
@@ -1234,6 +1404,7 @@ class DubbingApp:
                 "result_files": [],
                 "created_at": datetime.now().isoformat(),
                 "video_info": video_info,
+                "source_lang": selected_lang,
             }
 
             self.jobs.append(job)
@@ -1290,6 +1461,10 @@ class DubbingApp:
             self.show_toast("작업 취소됨", severity=ToastSeverity.WARNING)
             # 컨트롤러 정리
             del self.pause_controllers[job_id]
+
+    def change_subtitle_lang(self, job: dict):
+        """자막 언어 변경"""
+        save_jobs(self.jobs)
 
     def clear_completed(self, e):
         self.jobs = [j for j in self.jobs if j["status"] not in ("completed", "error")]
@@ -1366,6 +1541,7 @@ class DubbingApp:
                     config=self.config,
                     on_progress=on_progress,
                     pause_controller=pause_controller,
+                    source_lang=job.get("source_lang", "en"),
                 ),
             )
 

@@ -36,6 +36,13 @@ class Config:
     # UI 설정
     theme: str = "purple-night"
 
+    # 번역 스타일 설정
+    translation_style: str = "natural"  # "faithful" (원문 충실) | "natural" (자연스러운 더빙)
+    translation_tone: str = "lecture"   # "lecture" (강의체) | "casual" (대화체) | "formal" (뉴스체)
+
+    # 자막 언어 설정
+    source_lang: str = "en"  # 기본 자막 언어
+
 
 def load_config() -> Config:
     """설정 파일 로드 (누락된 필드는 기본값 사용)"""

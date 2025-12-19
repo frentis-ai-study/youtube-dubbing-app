@@ -6,6 +6,255 @@ import httpx
 from openai import OpenAI
 
 
+# 번역 스타일별 프롬프트
+TRANSLATION_PROMPTS = {
+    "faithful": {
+        "base": """당신은 전문 번역가입니다. YouTube 자동 자막을 정제하고 {target_lang}로 번역합니다.
+
+## 1단계: 자동 자막 정제 (번역 전 처리)
+YouTube 자동 자막은 다음 문제가 있습니다:
+- 같은 문장이 여러 번 반복됨 (중복 제거 필요)
+- 문장이 중간에 끊겨서 다음 줄에 이어짐 (병합 필요)
+- 필러: um, uh, you know, like, basically, actually 등 (제거)
+- 철자 오류, 반복 단어 (I I → I)
+
+반드시 중복을 제거하고 완전한 문장으로 재구성하세요.
+
+## 2단계: 번역 (원문 충실 모드)
+1. 원문의 의미와 구조를 최대한 유지
+2. 전문 용어는 정확하게 번역
+3. 구어체로 자연스럽게 변환 (TTS용)
+4. 번역문만 출력 (설명/원문 없이)""",
+    },
+    "natural": {
+        "base": """당신은 더빙 전문 번역가입니다. YouTube 자동 자막을 정제하고 자연스러운 {target_lang} 더빙 스크립트로 변환합니다.
+
+## 1단계: 자동 자막 정제 (번역 전 처리)
+YouTube 자동 자막은 다음 문제가 있습니다:
+- 같은 문장이 여러 번 반복됨 (중복 제거 필요)
+- 문장이 중간에 끊겨서 다음 줄에 이어짐 (병합 필요)
+- 필러: um, uh, you know, like, basically, actually 등 (제거)
+- 철자 오류, 반복 단어 (I I → I)
+
+반드시 중복을 제거하고 완전한 문장으로 재구성하세요.
+
+## 2단계: 번역 (자연스러운 더빙 모드)
+1. 한국어 화자가 말하듯이 자연스럽게 변환
+2. 문장 구조를 한국어에 맞게 재배치
+3. 불필요한 수식어 제거, 핵심만 전달
+4. 이전 문맥을 고려한 연결어 사용
+5. 번역문만 출력 (설명/원문 없이)""",
+        "tones": {
+            "lecture": """
+## 톤: 강의체
+- 존댓말 사용 (~입니다, ~해요, ~거든요)
+- 청자를 배려하는 표현 (여러분, ~해볼게요)
+- 설명적이고 친근한 어조""",
+            "casual": """
+## 톤: 대화체
+- 반말 또는 친근한 존댓말 (~야, ~거든, ~잖아)
+- 감탄사/추임새 자연스럽게 사용
+- 일상 대화처럼 가볍게""",
+            "formal": """
+## 톤: 뉴스체
+- 격식체 존댓말 (~습니다, ~됩니다)
+- 객관적이고 정제된 표현
+- 간결하고 명확한 문장""",
+        },
+    },
+}
+
+
+def get_translation_prompt(
+    style: str = "natural",
+    tone: str = "lecture",
+    source_lang: str = "영어",
+    target_lang: str = "한국어",
+) -> str:
+    """
+    번역 스타일과 톤에 따른 시스템 프롬프트 생성
+
+    Args:
+        style: "faithful" (원문 충실) | "natural" (자연스러운 더빙)
+        tone: "lecture" (강의체) | "casual" (대화체) | "formal" (뉴스체)
+        source_lang: 원본 언어
+        target_lang: 타겟 언어
+
+    Returns:
+        str: 시스템 프롬프트
+    """
+    if style not in TRANSLATION_PROMPTS:
+        style = "natural"
+
+    prompt_config = TRANSLATION_PROMPTS[style]
+    base_prompt = prompt_config["base"].format(
+        source_lang=source_lang,
+        target_lang=target_lang,
+    )
+
+    # natural 스타일은 톤 추가
+    if style == "natural" and "tones" in prompt_config:
+        if tone not in prompt_config["tones"]:
+            tone = "lecture"
+        base_prompt += prompt_config["tones"][tone]
+
+    return base_prompt
+
+
+def preprocess_segments(segments: list[dict]) -> list[dict]:
+    """
+    자막 세그먼트 전처리: 중복 제거 + 문장 병합
+
+    YouTube 자동 자막 특성:
+    - 같은 텍스트가 여러 세그먼트에 걸쳐 반복됨
+    - 문장이 세그먼트 경계에서 끊김
+
+    Args:
+        segments: 원본 자막 세그먼트 리스트
+
+    Returns:
+        정제된 세그먼트 리스트
+    """
+    if not segments:
+        return []
+
+    # 1단계: 중복 텍스트 제거
+    cleaned = []
+    prev_text = ""
+
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+
+        # 이전 세그먼트와 겹치는 부분 제거
+        if prev_text and text.startswith(prev_text):
+            # 완전히 포함된 경우 스킵
+            if text == prev_text:
+                continue
+            # 앞부분이 겹치면 새로운 부분만 추출
+            text = text[len(prev_text):].strip()
+            if not text:
+                continue
+
+        # 이전 텍스트가 현재 텍스트에 포함된 경우
+        if prev_text and prev_text in text:
+            # 중복 부분 제거
+            text = text.replace(prev_text, "", 1).strip()
+            if not text:
+                continue
+
+        cleaned.append({
+            **seg,
+            "text": text,
+        })
+        prev_text = seg.get("text", "").strip()  # 원본 텍스트로 비교
+
+    # 2단계: 짧은 세그먼트 병합 (문장 완성)
+    merged = []
+    buffer = {"text": "", "start": "", "end": ""}
+
+    for seg in cleaned:
+        text = seg.get("text", "")
+
+        if not buffer["text"]:
+            buffer = {
+                "text": text,
+                "start": seg.get("start", ""),
+                "end": seg.get("end", ""),
+            }
+        else:
+            # 이전 버퍼에 추가
+            buffer["text"] += " " + text
+            buffer["end"] = seg.get("end", "")
+
+        # 문장 끝이면 병합 완료
+        if _is_sentence_end(buffer["text"]) or len(buffer["text"]) > 200:
+            merged.append(buffer)
+            buffer = {"text": "", "start": "", "end": ""}
+
+    # 남은 버퍼 추가
+    if buffer["text"]:
+        merged.append(buffer)
+
+    print(f"[전처리] {len(segments)}개 → {len(merged)}개 세그먼트 (중복 제거 + 병합)", file=sys.stderr)
+    return merged
+
+
+def remove_duplicate_lines(text: str) -> str:
+    """
+    번역 결과에서 연속 중복 문장 제거
+
+    Args:
+        text: 번역된 텍스트
+
+    Returns:
+        중복 제거된 텍스트
+    """
+    lines = text.split('\n')
+    result = []
+    prev = ""
+
+    for line in lines:
+        stripped = line.strip()
+        # 빈 줄은 유지
+        if not stripped:
+            result.append(line)
+            prev = ""
+            continue
+
+        # 이전 줄과 같으면 스킵
+        if stripped == prev:
+            continue
+
+        # 이전 줄이 현재 줄에 포함되면 현재 줄만 사용 (더 긴 문장 우선)
+        if prev and prev in stripped:
+            if result:
+                result[-1] = line
+            prev = stripped
+            continue
+
+        # 현재 줄이 이전 줄에 포함되면 스킵 (더 긴 문장 유지)
+        if prev and stripped in prev:
+            continue
+
+        result.append(line)
+        prev = stripped
+
+    return '\n'.join(result)
+
+
+def remove_fillers(text: str) -> str:
+    """
+    필러 및 반복 표현 제거
+
+    Args:
+        text: 원본 텍스트
+
+    Returns:
+        정제된 텍스트
+    """
+    import re
+
+    # 영어 필러
+    fillers = [
+        r'\b(um|uh|er|ah|like|you know|I mean|so|well|basically|actually|literally)\b',
+        r'\b(kind of|sort of|right\?|okay\?|yeah\?)\b',
+    ]
+
+    result = text
+    for pattern in fillers:
+        result = re.sub(pattern, '', result, flags=re.IGNORECASE)
+
+    # 연속 공백 정리
+    result = re.sub(r'\s+', ' ', result).strip()
+
+    # 반복 단어 제거 (I I → I, the the → the)
+    result = re.sub(r'\b(\w+)\s+\1\b', r'\1', result, flags=re.IGNORECASE)
+
+    return result
+
+
 def check_ollama_status(base_url: str = "http://localhost:11434") -> dict:
     """
     Ollama 서버 상태 확인
@@ -178,6 +427,9 @@ def translate_text(
     target_lang: str = "한국어",
     timeout: int = 180,
     max_retries: int = 2,
+    translation_style: str = "natural",
+    translation_tone: str = "lecture",
+    prev_context: str = "",  # 이전 청크의 마지막 번역 (컨텍스트용)
 ) -> dict:
     """
     z.ai GLM으로 텍스트 번역 (타임아웃 및 재시도 지원)
@@ -237,19 +489,28 @@ def translate_text(
                 timeout=timeout,
             )
 
-            system_prompt = f"""당신은 전문 번역가입니다. {source_lang}를 자연스러운 {target_lang}로 번역합니다.
+            system_prompt = get_translation_prompt(
+                style=translation_style,
+                tone=translation_tone,
+                source_lang=source_lang,
+                target_lang=target_lang,
+            )
 
-번역 규칙:
-1. 자연스럽고 읽기 쉬운 {target_lang}로 번역
-2. 원문의 의미와 뉘앙스 유지
-3. 구어체로 번역 (TTS로 읽힐 예정)
-4. 번역문만 출력 (설명 없이)"""
+            # 컨텍스트가 있으면 user 메시지에 포함
+            if prev_context:
+                user_content = f"""[이전 번역 컨텍스트 - 문맥 연결용, 다시 번역하지 마세요]
+{prev_context}
+
+[번역할 자막]
+{text}"""
+            else:
+                user_content = text
 
             response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text},
+                    {"role": "user", "content": user_content},
                 ],
                 temperature=0.3,
             )
@@ -377,6 +638,8 @@ def translate_by_segments(
     max_parallel: int = 3,  # 동시 번역 수
     on_progress: callable = None,
     chunks_dir: str | None = None,  # 청크 저장 디렉토리
+    translation_style: str = "natural",
+    translation_tone: str = "lecture",
 ) -> dict:
     """
     세그먼트를 시간 기반으로 청크 분할하여 병렬 번역
@@ -406,8 +669,15 @@ def translate_by_segments(
     if not segments:
         return {"success": True, "translated": ""}
 
+    # 전처리: 중복 제거 + 문장 병합 + 필러 제거
+    processed_segments = preprocess_segments(segments)
+
+    # 각 세그먼트 텍스트에서 필러 제거
+    for seg in processed_segments:
+        seg["text"] = remove_fillers(seg.get("text", ""))
+
     # 시간 + 문자 수 기반으로 청크 분할
-    time_chunks = split_segments_by_time(segments, chunk_duration, max_chars)
+    time_chunks = split_segments_by_time(processed_segments, chunk_duration, max_chars)
     total = len(time_chunks)
     print(f"[번역] 총 {total}개 청크로 분할됨 ({chunk_duration}초/{max_chars}자 문장경계, 병렬 {max_parallel}개)", file=sys.stderr)
 
@@ -425,10 +695,11 @@ def translate_by_segments(
         }
         meta_file.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2))
 
-    # 청크 텍스트 준비 + 기존 완료 청크 확인
+    # 청크 텍스트 준비 + 기존 완료 청크 확인 + 컨텍스트 오버랩
     chunk_data = []
     results = [None] * total
     already_completed = 0
+    prev_chunk_tail = ""  # 이전 청크의 마지막 2문장 (컨텍스트용)
 
     for i, chunk_segments in enumerate(time_chunks):
         chunk_text = "\n".join(seg["text"] for seg in chunk_segments)
@@ -441,13 +712,21 @@ def translate_by_segments(
                 results[i] = chunk_file.read_text(encoding="utf-8")
                 already_completed += 1
                 print(f"[번역] 청크 {i+1}/{total} 이미 완료 (스킵)", file=sys.stderr)
+                # 다음 청크 컨텍스트용으로 마지막 2문장 저장
+                lines = chunk_text.split("\n")
+                prev_chunk_tail = "\n".join(lines[-2:]) if len(lines) >= 2 else chunk_text
                 continue
 
         chunk_data.append({
             "index": i,
             "text": chunk_text,
             "start": chunk_start,
+            "prev_context": prev_chunk_tail,  # 이전 청크 원문 컨텍스트
         })
+
+        # 다음 청크 컨텍스트용으로 마지막 2문장 저장
+        lines = chunk_text.split("\n")
+        prev_chunk_tail = "\n".join(lines[-2:]) if len(lines) >= 2 else chunk_text
 
     # 모든 청크가 이미 완료된 경우
     if not chunk_data:
@@ -473,6 +752,9 @@ def translate_by_segments(
             api_key,
             base_url,
             model,
+            translation_style=translation_style,
+            translation_tone=translation_tone,
+            prev_context=chunk.get("prev_context", ""),
         )
 
         # 성공 시 파일 저장
@@ -517,9 +799,14 @@ def translate_by_segments(
     if error_result:
         return error_result
 
+    # 후처리: 연속 중복 문장 제거
+    final_text = "\n".join(results)
+    final_text = remove_duplicate_lines(final_text)
+    print(f"[후처리] 연속 중복 문장 제거 완료", file=sys.stderr)
+
     return {
         "success": True,
-        "translated": "\n".join(results),
+        "translated": final_text,
     }
 
 
@@ -532,6 +819,8 @@ def translate_full_text(
     on_progress: callable = None,
     segments: list[dict] = None,  # 세그먼트가 있으면 시간 기반 번역 사용
     chunks_dir: str | None = None,  # 청크 저장 디렉토리
+    translation_style: str = "natural",
+    translation_tone: str = "lecture",
 ) -> dict:
     """
     긴 텍스트를 청크 단위로 번역
@@ -562,6 +851,8 @@ def translate_full_text(
             model=model,
             on_progress=on_progress,
             chunks_dir=chunks_dir,
+            translation_style=translation_style,
+            translation_tone=translation_tone,
         )
 
     import json
@@ -569,7 +860,11 @@ def translate_full_text(
 
     # 짧은 텍스트는 바로 번역
     if len(text) <= chunk_size:
-        return translate_text(text, api_key, base_url, model)
+        return translate_text(
+            text, api_key, base_url, model,
+            translation_style=translation_style,
+            translation_tone=translation_tone,
+        )
 
     # 문장 단위로 청크 분할 (fallback)
     chunks = _split_into_chunks(text, chunk_size)
@@ -605,7 +900,11 @@ def translate_full_text(
                 continue
 
         print(f"[번역] 청크 {i+1}/{total} 번역 중...", file=sys.stderr)
-        result = translate_text(chunk, api_key, base_url, model)
+        result = translate_text(
+            chunk, api_key, base_url, model,
+            translation_style=translation_style,
+            translation_tone=translation_tone,
+        )
 
         if not result["success"]:
             return result
